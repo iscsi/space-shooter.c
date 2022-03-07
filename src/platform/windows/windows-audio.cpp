@@ -56,68 +56,66 @@ void WINAPI OnBufferEnd(IXAudio2VoiceCallback* This, void* pBufferContext)    {
     channel->inUse = false;
 }
 
-void WINAPI OnStreamEnd(IXAudio2VoiceCallback* This) { }
-void WINAPI OnVoiceProcessingPassEnd(IXAudio2VoiceCallback* This) { }
-void WINAPI OnVoiceProcessingPassStart(IXAudio2VoiceCallback* This, UINT32 SamplesRequired) { }
-void WINAPI OnBufferStart(IXAudio2VoiceCallback* This, void* pBufferContext) { }
-void WINAPI OnLoopEnd(IXAudio2VoiceCallback* This, void* pBufferContext) { }
-void WINAPI OnVoiceError(IXAudio2VoiceCallback* This, void* pBufferContext, HRESULT Error) { }
+class VoiceCallback : public IXAudio2VoiceCallback
+{
+public:
+	HANDLE hBufferEndEvent;
+	VoiceCallback() : hBufferEndEvent(CreateEvent(NULL, FALSE, FALSE, NULL)) {}
+	~VoiceCallback() { CloseHandle(hBufferEndEvent); }
+
+	//Called when the voice has just finished playing a contiguous audio stream.
+	void OnStreamEnd() { SetEvent(hBufferEndEvent); }
+
+	//Unused methods are stubs
+	void OnVoiceProcessingPassEnd() { }
+	void OnVoiceProcessingPassStart(UINT32 SamplesRequired) {    }
+	void OnBufferEnd(void* pBufferContext) { }
+	void OnBufferStart(void* pBufferContext) {    }
+	void OnLoopEnd(void* pBufferContext) {    }
+	void OnVoiceError(void* pBufferContext, HRESULT Error) { }
+};
 
 static struct {
     IXAudio2* xaudio;
     IXAudio2MasteringVoice* xaudioMasterVoice;
     AudioStream channels[SPACE_SHOOTER_AUDIO_MIXER_CHANNELS];
-    IXAudio2VoiceCallback callbacks;
-} audio = {
-    .callbacks = {
-        .lpVtbl = &(IXAudio2VoiceCallbackVtbl) {
-            .OnStreamEnd = OnStreamEnd,
-            .OnVoiceProcessingPassEnd = OnVoiceProcessingPassEnd,
-            .OnVoiceProcessingPassStart = OnVoiceProcessingPassStart,
-            .OnBufferEnd = OnBufferEnd,
-            .OnBufferStart = OnBufferStart,
-            .OnLoopEnd = OnLoopEnd,
-            .OnVoiceError = OnVoiceError
-        }
-    }
-};
+    VoiceCallback* callbacks;
+} audio;
 
 bool windows_initAudio(void) {
     HRESULT comResult = CoInitializeEx(NULL, COINIT_MULTITHREADED);
     if (FAILED(comResult)) {
         goto ERROR_NO_RESOURCES;
     }
-
+    
     comResult = XAudio2Create(&audio.xaudio, 0, XAUDIO2_DEFAULT_PROCESSOR);
     if (FAILED(comResult)) {
         goto ERROR_COM;
     }
 
-    comResult = IXAudio2_CreateMasteringVoice(
-        audio.xaudio,
-        &audio.xaudioMasterVoice,
-        SPACE_SHOOTER_AUDIO_CHANNELS,
-        SPACE_SHOOTER_AUDIO_SAMPLE_RATE,
-        0,
-        NULL,
-        NULL,
-        AudioCategory_GameEffects
-    );
+	comResult = audio.xaudio->CreateMasteringVoice(&audio.xaudioMasterVoice,
+		SPACE_SHOOTER_AUDIO_CHANNELS,
+		SPACE_SHOOTER_AUDIO_SAMPLE_RATE,
+		0,
+		NULL,
+		NULL,
+		AudioCategory_GameEffects);
     if (FAILED(comResult)) {
         goto ERROR_XAUDIO2;
     }
+
+    audio.callbacks = new VoiceCallback();
 
     for (int32_t i = 0; i < SPACE_SHOOTER_AUDIO_MIXER_CHANNELS; ++i) {
         audio.channels[i].buffer.Flags = XAUDIO2_END_OF_STREAM;
         audio.channels[i].buffer.pContext = audio.channels + i;
 
-        comResult = IXAudio2_CreateSourceVoice(
-            audio.xaudio,
+        comResult = audio.xaudio->CreateSourceVoice(
             &audio.channels[i].voice,
             &AUDIO_SOURCE_FORMAT,
             0,
             XAUDIO2_DEFAULT_FREQ_RATIO,
-            &audio.callbacks,
+            audio.callbacks,
             NULL,
             NULL
         );
@@ -138,8 +136,11 @@ bool windows_initAudio(void) {
     ///////////////////
 
     ERROR_XAUDIO2:
-    IXAudio2_Release(audio.xaudio);
+    audio.xaudio->Release();
     audio.xaudio = NULL;
+
+    delete audio.callbacks;
+    audio.callbacks = nullptr;
 
     ERROR_COM:
     CoUninitialize();
@@ -159,8 +160,8 @@ void platform_playSound(Data_Buffer* sound, bool loop) {
             buffer->LoopCount = loop ? XAUDIO2_LOOP_INFINITE : 0;
             buffer->AudioBytes = sound->size;
             buffer->pAudioData = sound->data;
-            IXAudio2SourceVoice_Start(audio.channels[i].voice, 0, XAUDIO2_COMMIT_NOW);
-            IXAudio2SourceVoice_SubmitSourceBuffer(audio.channels[i].voice, buffer, NULL);
+            audio.channels[i].voice->Start(0, XAUDIO2_COMMIT_NOW);
+            audio.channels[i].voice->SubmitSourceBuffer(buffer, NULL);
             audio.channels[i].inUse = true;
             break;
         }
@@ -174,14 +175,15 @@ void windows_closeAudio(void) {
 
     for (int32_t i = 0; i < SPACE_SHOOTER_AUDIO_MIXER_CHANNELS; ++i) {
         if (audio.channels[i].inUse) {
-            IXAudio2SourceVoice_Stop(audio.channels[i].voice, 0, XAUDIO2_COMMIT_NOW);
+            audio.channels[i].voice->Stop(0, XAUDIO2_COMMIT_NOW);
             audio.channels[i].inUse = false;
             break;
         }
     }
 
-    IXAudio2_Release(audio.xaudio);
+    audio.xaudio->Release();
     audio.xaudio = NULL;
+    delete audio.callbacks;
+    audio.callbacks = nullptr;
     CoUninitialize();
 }
-

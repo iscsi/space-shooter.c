@@ -74,7 +74,7 @@ void events_beforeFrame(Events_Sequence* sequence, float elapsedTime) {
                     sequence->alpha = 1.0f;
                 } 
             }
-            sequence->activeEvent = event->id;
+            sequence->activeEvent = static_cast<Events_Id>(event->id);
             break;
         }
     }
